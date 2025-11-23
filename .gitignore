@@ -1,0 +1,6 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+raw_data/Curio.all_samples.allinfo.tsv.gz
+raw_data/P7.PFC_Hipp.tsv.gz
