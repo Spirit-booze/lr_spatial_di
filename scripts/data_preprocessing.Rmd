@@ -1,0 +1,133 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-11-26"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse) # для общего парсинга
+library(biomaRt) # прицельно для работы с идентификаторами генов
+library(vegan)
+
+```
+
+Распарсим это чудо
+
+```{r}
+
+colnames = c('read_id', 'gene_id_ensembl', 'cell_type', 'barcode', 'transcript_id_ensembl')
+df_PFC_Hippo = readr::read_tsv('../raw_data/P7.PFC+Hipp.tsv.gz', col_names = colnames)
+#df_Curio_all = readr::read_tsv('raw_data/Curio.all_samples.allinfo.tsv.gz', col_names = colnames)
+
+# эта регулярка сводит с ума
+reads <- df_PFC_Hippo %>%
+  mutate(gene_id_clean = sub("\\.\\d+$", "", gene_id_ensembl))
+
+
+```
+
+Вытащим отдельно аннотацию клеток
+
+```{r}
+barcode_ann = reads %>% 
+  dplyr::select(c('barcode', 'cell_type')) %>% 
+  distinct
+```
+
+
+```{r}
+
+
+mart <- useEnsembl(
+  biomart = "genes",
+  dataset = "mmusculus_gene_ensembl"
+)
+
+unique_genes <- unique(reads$gene_id_clean)
+
+# mgi символ вместо hgnc, потому что МЫШЬ
+annot <- getBM(
+  attributes = c("ensembl_gene_id", "mgi_symbol"),
+  filters    = "ensembl_gene_id",
+  values     = unique_genes,
+  mart       = mart
+)
+
+# на всякий случай без дублей
+annot = annot %>% 
+  distinct(ensembl_gene_id, .keep_all = TRUE)
+
+# чуть витиевато, чтобы потом толком отлавливать NA
+reads = reads %>% 
+  left_join(annot, by=c("gene_id_clean" = "ensembl_gene_id")) %>% 
+  mutate(
+    gene_symbol = ifelse(
+      mgi_symbol == "" | is.na(mgi_symbol),
+      gene_id_clean,
+      mgi_symbol
+    )
+  )
+
+sum(grepl("^ENSMUSG", reads$gene_symbol))
+# ну то есть 3622 случая не получили идентификатора MGI. Бывает.
+
+# теперь преобразуем это в матрицу каунтов
+counts_long_by_barcode = reads %>% 
+  group_by(barcode, gene_symbol) %>% 
+  summarise(count=n(), .groups="drop")
+
+count_wise = counts_long_by_barcode %>% 
+  pivot_wider(
+    names_from = gene_symbol,
+    values_from = count,
+    values_fill = 0,
+  )
+
+```
+
+Поиграем немного. Потыкаем типичные маркеры нервных клеток. Просто чтобы как-то оценить разреженность данных
+
+```{r}
+count_wise$Ascl1 %>% 
+  hist
+
+print(table(count_wise$Ascl1 > 0))
+
+count_wise$Eno2 %>% 
+  hist
+print(table(count_wise$Eno2 > 0))
+
+count_wise %>% 
+  dplyr::select(-barcode) %>% 
+  apply(1, sum) %>% 
+  hist
+```
+
+Видим, что даже типичные нервные маркеры экспрессируются экстремально мало.
+
+А если прям весь датасет взять по экспрессиям генов и преобразовать?
+
+```{r}
+
+apply(count_wise %>% dplyr::select(-barcode), 2, sd) %>% sort(decreasing=T) %>% head(20)
+
+```
+
+Подавляющее большинство (считай, 13000 из 13420) генов имеют стандартное отклонение меньше единицы.
+В bulk RNA-Seq ещё числоые данные.
+В scRNA-Seq они разреженные.
+А вот тут они становятся разреженными экстра-класса.
+
+Хорошо.
+Попробуем сделать глупость.
+У нас есть желание выполнить дисперсионный (кхм, ну не дисперсионный, но идейно близкий к дисперсионному) анализ.
+Прокрутим perMANOVA.
+На максимально неудачных метриках (пусть это будет Евклид).
+И на чём-то более стоящем (видимо, либо расстояние косинусное, либо Сёренсена-Дисе)
+
+```{r}
+counts_dist = vegdist(count_wise %>% dplyr::select(-barcode), method='bray')
+```
+

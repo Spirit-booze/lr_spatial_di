@@ -1,5 +1,6 @@
 library(tidyverse) # для общего парсинга
 library(biomaRt) # прицельно для работы с идентификаторами генов
+library(vegan)
 
 colnames = c('read_id', 'gene_id_ensembl', 'cell_type', 'barcode', 'transcript_id_ensembl')
 df_PFC_Hippo = readr::read_tsv('raw_data/P7.PFC+Hipp.tsv.gz', col_names = colnames)
@@ -43,13 +44,13 @@ sum(grepl("^ENSMUSG", reads$gene_symbol))
 # ну то есть 3622 случая не получили идентификатора MGI. Бывает.
 
 # теперь преобразуем это в матрицу каунтов
-counts_long = reads %>% 
+counts_long_by_barcode = reads %>% 
   group_by(barcode, gene_symbol) %>% 
   summarise(count=n(), .groups="drop")
 
-count_wise = counts_long %>% 
+count_wise = counts_long_by_barcode %>% 
   pivot_wider(
-    names_from = barcode,
+    names_from = gene_symbol,
     values_from = count,
     values_fill = 0,
   )
