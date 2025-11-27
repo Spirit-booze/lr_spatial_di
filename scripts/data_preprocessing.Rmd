@@ -87,6 +87,23 @@ count_wise = counts_long_by_barcode %>%
 
 ```
 
+саггрегируем по типам клеток. Тут нужно немного поколдовать.
+
+```{r}
+counts_long_by_cell_type = counts_long_by_barcode %>% 
+  left_join(barcode_ann, by=c('barcode')) %>% 
+  group_by(cell_type, gene_symbol) %>% 
+  summarise(mean_count = mean(count), .groups='drop')
+
+counts_wide_by_cell_type = counts_long_by_cell_type %>% 
+  pivot_wider(
+    names_from = gene_symbol,
+    values_from = mean_count,
+    values_fill = 0,
+  )
+```
+
+
 Поиграем немного. Потыкаем типичные маркеры нервных клеток. Просто чтобы как-то оценить разреженность данных
 
 ```{r}
@@ -128,6 +145,19 @@ apply(count_wise %>% dplyr::select(-barcode), 2, sd) %>% sort(decreasing=T) %>% 
 И на чём-то более стоящем (видимо, либо расстояние косинусное, либо Сёренсена-Дисе)
 
 ```{r}
-counts_dist = vegdist(count_wise %>% dplyr::select(-barcode), method='bray')
+# закомменчено, т.к. матрица 13000 х 13000 слишком долго считается
+#counts_dist = vegdist(count_wise %>% dplyr::select(-barcode), method='bray')
 ```
 
+
+## кластеризация
+
+Попробуем сделать дендрограмму средних каунтов на клеточный тип.
+
+```{r}
+counts_wide_by_cell_type = as.data.frame(counts_wide_by_cell_type)
+rownames(counts_wide_by_cell_type) = counts_wide_by_cell_type$cell_type
+d = vegdist(counts_wide_by_cell_type[, -1], method='manhattan')
+hc1 <- hclust(d, method = "complete" )
+plot(hc1, cex = 0.6, hang = -1)
+```
