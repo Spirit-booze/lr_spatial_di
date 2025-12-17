@@ -161,3 +161,58 @@ d = vegdist(counts_wide_by_cell_type[, -1], method='manhattan')
 hc1 <- hclust(d, method = "complete" )
 plot(hc1, cex = 0.6, hang = -1)
 ```
+
+Поколдуем немного с работой с транскриптами.
+Выдернем рандомные 100 генов из 
+
+```{r transcript preprocessing}
+
+transcript_preproc = function(long_table, gene_id){
+  subset = long_table %>% filter(gene_symbol == gene_id & transcript_id_ensembl != 'novel')
+  return (subset)
+}
+
+```
+
+Сэмплируем 100 рандомных генчиков
+
+```{r}
+set.seed(123)
+genes = sample(unique(reads$gene_symbol), size=100, replace=FALSE)
+```
+
+```{r}
+processed_table = transcript_preproc(reads, gene_id='Gyg1') %>% 
+  group_by(barcode, transcript_id_ensembl) %>% 
+  summarise(count=n(), .groups="drop") %>% 
+  pivot_wider(
+   names_from = transcript_id_ensembl,
+   values_from = count,
+   values_fill = 0,
+  ) %>% 
+  rowwise %>% 
+  mutate(across(where(is.numeric),
+                ~ .x / sum (c_across(where(is.numeric))))) %>% 
+  ungroup %>% 
+  left_join(barcode_ann, by=c('barcode')) %>% 
+  group_by(barcode) %>% 
+  summarise(
+    across(where(is.numeric), mean),
+    .groups = "drop"
+  )
+  
+  
+```
+
+```{r}
+matrix = processed_table %>% dplyr::select(-cell_type)
+labels = factor(processed_table$cell_type)
+
+transcript_dists = vegdist(matrix, method='bray')
+```
+
+```{r}
+result = adonis2(transcript_dists ~ cell_type, data=processed_table, permutations=9999)
+result
+```
+
