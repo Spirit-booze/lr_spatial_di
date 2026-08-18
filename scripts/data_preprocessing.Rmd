@@ -1,0 +1,550 @@
+---
+title: "Untitled"
+output: html_document
+date: "2025-11-26"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse) # для общего парсинга
+library(biomaRt) # прицельно для работы с идентификаторами генов
+library(vegan)
+
+
+theme_general = theme(
+  plot.title = element_text(size=25, hjust=0.5),
+  plot.subtitle = element_text(size=18, hjust=0.5),
+  axis.title = element_text(size=17),
+  legend.title = element_text(size=17),
+  axis.text.x = element_text(size=12),
+  axis.text.y = element_text(size=12),
+  legend.text = element_text(size=12),
+  panel.background = element_rect(fill='white'),
+  panel.grid = element_line(linewidth=0,3, color='gray75'),
+  panel.border = element_rect()
+  )
+```
+
+```{r}
+ggplot(data = df, aes(x=n_cells, y=calc_time))+
+  geom_point()+
+  theme_general+
+  labs(y='Calculation time, seconds', x='Amount of cells expressing the gene',
+       title='PERMANOVA calculation time \ndepending on amount of\nexpressing cells')
+```
+```{r}
+library(patchwork)
+
+x = ggplot(data = df, aes(x=p_value))+
+  geom_histogram(col='black', fill='cornsilk')+
+  geom_vline(
+    xintercept = 0.05,
+    linetype = "dashed",
+    color = "red"
+  )+
+  theme_general+
+  labs(y='amount of test results',
+       x='p-value'
+       )
+
+y = ggplot(data = df, aes(x=-log10(p_value)))+
+  geom_histogram(col='black', fill='cornsilk')+
+  geom_vline(
+    xintercept = -log10(0.05),
+    linetype = "dashed",
+    color = "red"
+  )+
+  theme_general+
+  labs(y='amount of test results',
+       x='p-value, -log10'
+       )
+  
+(x | y) +
+  plot_annotation(
+    title = "PERMANOVA test results",
+    theme=theme_general
+  )
+
+```
+
+```{r}
+ggplot(data = df, aes(x=R2, y=transcripts))+
+  geom_point()+
+  theme_general+
+  labs(y='Calculation time, seconds', x='Amount of cells expressing the gene',
+       title='PERMANOVA calculation time \ndepending on amount of\nexpressing cells')
+```
+
+
+```{r}
+df1 = read.table('../2519_genes_10k_permute_3_levels.tsv')
+df2 = read.table('../866_3gr_1kperm.tsv')
+df = rbind(df1, df2)
+```
+
+
+Распарсим это чудо
+
+```{r}
+
+colnames = c('read_id', 'gene_id_ensembl', 'cell_type', 'barcode', 'transcript_id_ensembl')
+df_PFC_Hippo = readr::read_tsv('../raw_data/P7.PFC+Hipp.tsv.gz', col_names = colnames)
+#df_Curio_all = readr::read_tsv('raw_data/Curio.all_samples.allinfo.tsv.gz', col_names = colnames)
+
+# эта регулярка сводит с ума
+reads <- df_PFC_Hippo %>%
+  mutate(gene_id_clean = sub("\\.\\d+$", "", gene_id_ensembl))
+
+
+```
+
+Вытащим отдельно аннотацию клеток
+
+```{r}
+barcode_ann = reads %>% 
+  dplyr::select(c('barcode', 'cell_type')) %>% 
+  distinct
+
+# категоризация типов клеток от Эда
+barcode_ann <- barcode_ann %>%
+  mutate(cell_type = str_replace_all(cell_type, "PHipp_|PPFC_|P7Hipp_|P7PFC_", "")) %>%
+  mutate(cell_type = str_replace_all(cell_type, "\\d+", "")) %>%
+  mutate(
+    cell_three = case_when(
+      cell_type %in% c("ExcitNeuron", "InhibNeuron", "NIPCs", "GranuleNB") ~ "Neurons",
+      cell_type %in% c("Microglia", "Vasc", "Endo", 'Macrophages',
+                       'Myeloid') ~ "Vasc_Immune",
+      TRUE ~ "Glia"
+    )
+  ) %>%
+  mutate(
+    cell_many = if_else(cell_type == "Astro", "Astrocyte", cell_type)
+  ) %>%
+  mutate(
+    cell_two = case_when(cell_three %in% c('Glia', 'Vasc_Immune') ~ 'Non-neurons',
+    TRUE ~ 'Neurons'
+    )
+  )
+```
+
+
+```{r}
+mart <- useEnsembl(
+  biomart = "genes",
+  dataset = "mmusculus_gene_ensembl"
+)
+
+unique_genes <- unique(reads$gene_id_clean)
+
+# mgi символ вместо hgnc, потому что МЫШЬ
+annot <- getBM(
+  attributes = c("ensembl_gene_id", "mgi_symbol"),
+  filters    = "ensembl_gene_id",
+  values     = unique_genes,
+  mart       = mart
+)
+
+# на всякий случай без дублей
+annot = annot %>% 
+  distinct(ensembl_gene_id, .keep_all = TRUE)
+
+# чуть витиевато, чтобы потом толком отлавливать NA
+reads = reads %>% 
+  filter(transcript_id_ensembl != "novel") %>% 
+  left_join(annot, by=c("gene_id_clean" = "ensembl_gene_id")) %>% 
+  mutate(
+    gene_symbol = ifelse(
+      mgi_symbol == "" | is.na(mgi_symbol),
+      gene_id_clean,
+      mgi_symbol
+    )
+  )
+
+sum(grepl("^ENSMUSG", reads$gene_symbol))
+# ну то есть 3622 случая не получили идентификатора MGI. Бывает.
+
+# теперь преобразуем это в матрицу каунтов
+counts_long_by_barcode = reads %>% 
+  group_by(barcode, gene_symbol) %>% 
+  summarise(count=n(), .groups="drop")
+
+count_wise = counts_long_by_barcode %>% 
+  pivot_wider(
+    names_from = gene_symbol,
+    values_from = count,
+    values_fill = 0,
+  )
+```
+
+
+```{r}
+count_wise_extended = count_wise %>% 
+  left_join(barcode_ann[, c('barcode', 'cell_three')], by=c('barcode'))
+
+```
+
+саггрегируем по типам клеток. Тут нужно немного поколдовать.
+
+```{r}
+counts_long_by_cell_type = counts_long_by_barcode %>% 
+  left_join(barcode_ann[, c('barcode', 'cell_three')], by=c('barcode')) %>% 
+  group_by(cell_three, gene_symbol) %>% 
+  summarise(mean_count = mean(count), .groups='drop')
+
+counts_wide_by_cell_type = counts_long_by_cell_type %>% 
+  pivot_wider(
+    names_from = gene_symbol,
+    values_from = mean_count,
+    values_fill = 0,
+  )
+```
+Надо бы некоторую статистику провести по генам, которые мы можем использовать
+
+
+
+```{r}
+sums_by_barcode = count_wise_extended %>% 
+  mutate(total = rowSums(pick(where(is.numeric), -barcode))) %>% 
+  dplyr::select(barcode, total)
+
+plot(density(sums_by_barcode$total))
+
+sums_by_gene = count_wise_extended %>% 
+  dplyr::select(-barcode, -cell_three) %>% 
+  summarise(across(everything(), function(x) sum(as.logical(x))))
+
+#sums_by_gene <- sums_by_gene %>%
+#  select(where(~ !any(is.na(.))))
+
+plot(density(t(sums_by_gene)))
+
+
+
+```
+
+Оставим только те гены, которые:
+
+ - есть хотя бы в 100 клетках
+ - экспрессируются хотя бы в 2 разных клеточных типах (иначе смысла ноль)
+ - имеют хотя бы 2 разных транскрипта (бывают случаи, когда транскрипт всего один)
+
+```{r}
+# засунуть это в середину, чтобы была на руках аннотация - какие транскрипты у каких генов есть.
+gene_transcript_counts = reads %>% dplyr::select(transcript_id_ensembl, gene_symbol) %>% 
+  distinct %>% 
+  group_by(gene_symbol) %>% 
+  summarise(count=n())
+genes_gt_2_transcripts = gene_transcript_counts %>% filter(count >= 2) %>% pull(gene_symbol)
+```
+
+
+```{r genes_filtration}
+
+genes_all = colnames(count_wise %>% dplyr::select(-barcode))
+
+genes_in_100_1000_cells = colnames(sums_by_gene)[sums_by_gene > 100 & sums_by_gene < 2000]
+
+ctype_sums_by_gene = counts_wide_by_cell_type[genes_in_100_1000_cells] %>% 
+  summarise(across(everything(), function(x) sum(as.logical(x))))
+
+genes_in_2_ctypes = colnames(ctype_sums_by_gene)[ctype_sums_by_gene > 1]
+
+genes_with_everything = intersect(genes_gt_2_transcripts, genes_in_2_ctypes)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## кластеризация
+
+Попробуем сделать дендрограмму средних каунтов на клеточный тип.
+
+```{r}
+counts_wide_by_cell_type = as.data.frame(counts_wide_by_cell_type)
+rownames(counts_wide_by_cell_type) = counts_wide_by_cell_type$cell_type
+d = vegdist(counts_wide_by_cell_type[, -1], method='manhattan')
+hc1 <- hclust(d, method = "complete" )
+plot(hc1, cex = 0.6, hang = -1)
+```
+
+Поколдуем немного с работой с транскриптами.
+Выдернем рандомные 100 генов из 
+
+```{r transcript preprocessing}
+
+transcript_preproc = function(long_table, gene_id){
+  subset = long_table %>% filter(gene_symbol == gene_id & transcript_id_ensembl != 'novel')
+  return (subset)
+}
+
+```
+
+Сэмплируем 100 рандомных генчиков
+
+```{r}
+set.seed(123)
+genes_sample = sample(genes_with_everything, size=100, replace=FALSE)
+```
+
+```{r}
+genes_sample
+```
+
+```{r}
+new_genes = read.csv('../Differ_genes.csv')
+new_list = new_genes$Gene_Symbol
+#new_list = c('Ldhb')
+```
+
+
+```{r}
+
+rows <- vector("list", length(new_list))
+names(rows) <- new_list
+
+k = 0
+
+for (i in new_list) {
+  
+  k = k + 1
+  # timing
+  t0 <- Sys.time()
+  print(paste0('Calculating data for gene: ', i))
+  
+  processed_table = transcript_preproc(reads, gene_id=i) %>% 
+  group_by(barcode, transcript_id_ensembl) %>% 
+  summarise(count=n(), .groups="drop") %>% 
+  pivot_wider(
+   names_from = transcript_id_ensembl,
+   values_from = count,
+   values_fill = 0,
+  ) %>% 
+  rowwise() %>% 
+  mutate(across(where(is.numeric),
+                ~ .x / sum (c_across(where(is.numeric))))) %>% 
+  group_by(barcode) %>% 
+  summarise(
+    across(where(is.numeric), mean)
+  ) %>% 
+  left_join(barcode_ann[, c('barcode', 'cell_three')], by=c('barcode'))
+
+  matrix = processed_table %>% 
+    dplyr::select(-cell_three, -barcode) 
+  labels = factor(processed_table$cell_three)
+  transcript_dists = vegdist(matrix, binary=TRUE,
+                             method='jaccard')
+
+  
+  result = adonis2(transcript_dists ~ cell_three, 
+                   data=processed_table, 
+                   permutations=999,
+                   parallel=20)
+  
+  # timing
+  t1 <- Sys.time()
+  elapsed_time = as.numeric(difftime(t1, t0, units='secs'))
+  
+  
+  rows[[k]] = tibble(
+    gene_id = i,
+    calc_time = elapsed_time,
+    n_cells = nrow(matrix),
+    transcripts = ncol(matrix),
+    calc_df = result$Df[[1]],
+    pseudo_F = result$F[[1]],
+    R2 = result$R2[[1]],
+    p_value = result$`Pr(>F)`[[1]]
+  )
+
+  print(paste0('passed calculation time for the iteration: ', elapsed_time))
+  rm(processed_table, transcript_dists, result)
+  if (k %% 5 == 0) gc()
+#  print(result)
+#  bd <- betadisper(transcript_dists, labels)
+#  print(anova(bd))
+}
+
+summary_tbl = bind_rows(rows)
+```
+```{r}
+ggplot(data=summary_tbl, aes(x=p_value))+
+  geom_histogram(bins=35, col='black') +
+  labs(title='p-значение при PERMANOVA,\n10k пермутаций, 31 класс', x='p-значение', y='Количество случаев')+
+  theme_classic()
+```
+
+```{r}
+ggplot(data=summary_tbl, aes(x=transcripts, y=p_value))+
+  geom_point()
+```
+
+
+
+```{r}
+
+plus_control = c('Pkm', 'Rtn1', 'Pvalb', 'Oxr1')
+
+rows <- vector("list", length(plus_control))
+names(rows) <- plus_control
+
+k = 0
+
+for (i in plus_control) {
+  
+  k = k + 1
+  # timing
+  t0 <- Sys.time()
+  print(paste0('Calculating data for gene: ', i))
+  
+  processed_table = transcript_preproc(reads, gene_id=i) %>% 
+  group_by(barcode, transcript_id_ensembl) %>% 
+  summarise(count=n(), .groups="drop") %>% 
+  pivot_wider(
+   names_from = transcript_id_ensembl,
+   values_from = count,
+   values_fill = 0,
+  ) %>% 
+  rowwise() %>% 
+  mutate(across(where(is.numeric),
+                ~ .x / sum (c_across(where(is.numeric))))) %>% 
+  group_by(barcode) %>% 
+  summarise(
+    across(where(is.numeric), mean)
+  ) %>% 
+  left_join(barcode_ann, by=c('barcode'))
+
+  matrix = processed_table %>% 
+    dplyr::select(-cell_type, -barcode) 
+  labels = factor(processed_table$cell_type)
+  transcript_dists = vegdist(matrix, binary=TRUE,
+                             method='jaccard')
+
+  
+  result = adonis2(transcript_dists ~ cell_type, data=processed_table, permutations=999)
+  
+  # timing
+  t1 <- Sys.time()
+  elapsed_time = as.numeric(difftime(t1, t0, units='secs'))
+  
+  
+  rows[[k]] = tibble(
+    gene_id = i,
+    calc_time = elapsed_time,
+    n_cells = nrow(matrix),
+    transcripts = ncol(matrix),
+    calc_df = result$Df[[1]],
+    pseudo_F = result$F[[1]],
+    R2 = result$R2[[1]],
+    p_value = result$`Pr(>F)`[[1]]
+  )
+
+  print(paste0('passed calculation time for the iteration: ', elapsed_time))
+  rm(processed_table, transcript_dists, result)
+  if (k %% 5 == 0) gc()
+#  print(result)
+#  bd <- betadisper(transcript_dists, labels)
+#  print(anova(bd))
+}
+
+summary_plus_ctrl = bind_rows(rows)
+```
+
+
+
+```{r}
+processed_table = transcript_preproc(reads, gene_id='Tnik') %>% 
+  group_by(barcode, transcript_id_ensembl) %>% 
+  summarise(count=n(), .groups="drop") %>% 
+  pivot_wider(
+   names_from = transcript_id_ensembl,
+   values_from = count,
+   values_fill = 0,
+  ) %>% 
+  rowwise %>% 
+  mutate(across(where(is.numeric),
+                ~ .x / sum (c_across(where(is.numeric))))) %>% 
+  group_by(barcode) %>% 
+  summarise(
+    across(where(is.numeric), mean),
+  ) %>% 
+  left_join(barcode_ann, by=c('barcode'))
+  
+  
+```
+
+```{r}
+matrix = processed_table %>% dplyr::select(-cell_type, -barcode)
+labels = factor(processed_table$cell_type)
+
+transcript_dists = vegdist(matrix, method='jaccard')
+```
+
+```{r}
+start_time = Sys.time()
+result = adonis2(transcript_dists ~ cell_type, data=processed_table, permutations=999)
+end_time = Sys.time()
+result
+end_time - start_time
+```
+
+```{r}
+bd <- betadisper(transcript_dists, labels)
+anova(bd)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Поиграем немного. Потыкаем типичные маркеры нервных клеток. Просто чтобы как-то оценить разреженность данных
+
+```{r}
+count_wise$Ascl1 %>% 
+  hist
+
+print(table(count_wise$Ascl1 > 0))
+
+count_wise$Eno2 %>% 
+  hist
+print(table(count_wise$Eno2 > 0))
+
+count_wise %>% 
+  dplyr::select(-barcode) %>% 
+  apply(1, sum) %>% 
+  hist
+```
+
+Видим, что даже типичные нервные маркеры экспрессируются экстремально мало.
+
+А если прям весь датасет взять по экспрессиям генов и преобразовать?
+
+```{r}
+
+apply(count_wise %>% dplyr::select(-barcode), 2, sd) %>% sort(decreasing=T) %>% head(20)
+
+```
